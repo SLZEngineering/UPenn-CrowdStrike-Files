@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# ============================================================
+# Solutionz INC RMM Agent CrowdStrike and Nessus Installation
+# Version: 1.0.0
+# System Admin: Seneathia Williams
+# Last Update: 1/29/26
+# Description: Performs installation of CrowdStrike and Nessus
+#              on configured RMM Agents.
+# ============================================================
+
+set -euo pipefail
+
+SCRIPT_VERSION="1.0.0"
+
+# -----------------------------
+# Post-Setup Agent Installer
+# CrowdStrike Falcon + Tenable Nessus Agent
+# -----------------------------
+
+REPO="${REPO:-SLZEngineering/UPenn-CrowdStrike-Files}"
+
+FALCON_ASSET="${FALCON_ASSET:-falcon-sensor_amd64.deb}"
+NESSUS_ASSET="${NESSUS_ASSET:-NessusAgent_amd64.deb}"
+CHECKSUMS_ASSET="${CHECKSUMS_ASSET:-checksums.txt}"
+
+LOG_FILE="${LOG_FILE:-/var/log/solutionz_postsetup_agents.log}"
+
+CS_CID="${CS_CID:-}"
+NESSUS_KEY="${NESSUS_KEY:-}"
+NESSUS_HOST="${NESSUS_HOST:-}"
+NESSUS_PORT="${NESSUS_PORT:-8834}"
+NESSUS_GROUPS="${NESSUS_GROUPS:-}"
+
+usage() {
+  cat <<'EOF'
+Usage (non-interactive):
+  sudo bash post_setup_agents.sh \
+    --cid "<CROWDSTRIKE_CID>" \
+    --nessus-key "<NESSUS_LINK_KEY>" \
+    --nessus-host "<NESSUS_MANAGER_HOST>" \
+    [--nessus-port 8834] \
+    [--nessus-groups "Group1,Group2"] \
+    [--repo "OWNER/REPO"]
+
+Env var alternative:
+  export CS_CID="..."
+  export NESSUS_KEY="..."
+  export NESSUS_HOST="..."
+  sudo bash post_setup_agents.sh
+
+This script expects .deb installers as GitHub Release assets:
+  https://github.com/<OWNER>/<REPO>/releases/latest/download/falcon-sensor_amd64.deb
+  https://github.com/<OWNER>/<REPO>/releases/latest/download/NessusAgent_amd64.deb
+Optional:
+  checksums.txt in the same Release assets for sha256 verification.
+EOF
+}
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+as_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    die "Run with sudo/root."
+  fi
+}
+
+download() {
+  local url="$1"
+  local out="$2"
+
+  if need_cmd curl; then
+    curl -fL --retry 3 --connect-timeout 10 --max-time 900 -o "$out" "$url"
+    return 0
+  fi
+
+  if need_cmd wget; then
+    wget -O "$out" "$url"
+    return 0
+  fi
+
+  # Try to install curl if possible
+  if need_cmd apt-get; then
+    apt-get update -y || true
+    apt-get install -y curl ca-certificates || true
+  fi
+
+  need_cmd curl || die "Neither curl nor wget is available."
+  curl -fL --retry 3 --connect-timeout 10 --max-time 900 -o "$out" "$url"
+}
+
+is_installed() {
+  local pkg="$1"
+  dpkg-query -W -f='${Status}\n' "$pkg" 2>/dev/null | grep -q "install ok installed"
+}
+
+start_service_if_present() {
+  local svc="$1"
+
+  if need_cmd systemctl; then
+    if systemctl list-unit-files | awk '{print $1}' | grep -qx "${svc}.service"; then
+      systemctl enable --now "$svc" >/dev/null 2>&1 || systemctl restart "$svc" >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+
+  # SysV fallback
+  if [[ -x "/etc/init.d/$svc" ]]; then
+    "/etc/init.d/$svc" restart >/dev/null 2>&1 || true
+  fi
+}
+
+# -----------------------------
+# Parse args
+# -----------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cid) CS_CID="$2"; shift 2;;
+    --nessus-key) NESSUS_KEY="$2"; shift 2;;
+    --nessus-host) NESSUS_HOST="$2"; shift 2;;
+    --nessus-port) NESSUS_PORT="$2"; shift 2;;
+    --nessus-groups) NESSUS_GROUPS="$2"; shift 2;;
+    --repo) REPO="$2"; shift 2;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown argument: $1 (use --help)";;
+  esac
+done
+
+as_root
+
+# -----------------------------
+# Logging
+# -----------------------------
+touch "$LOG_FILE" || true
+chmod 0644 "$LOG_FILE" || true
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== Solutionz Domotz Post-Setup Agents ==="
+echo "Version: ${SCRIPT_VERSION}"
+echo "Repo: $REPO"
+echo "Time: $(date -Is)"
+echo "Log : $LOG_FILE"
+echo
+
+# -----------------------------
+# Validate required values
+# -----------------------------
+[[ -n "$CS_CID" ]] || die "Missing CrowdStrike CID. Provide --cid or set CS_CID."
+[[ -n "$NESSUS_KEY" ]] || die "Missing Nessus linking key. Provide --nessus-key or set NESSUS_KEY."
+[[ -n "$NESSUS_HOST" ]] || die "Missing Nessus manager host. Provide --nessus-host or set NESSUS_HOST."
+
+# -----------------------------
+# Download assets (Release latest)
+# -----------------------------
+WORKDIR="$(mktemp -d /tmp/solutionz-postsetup.XXXXXX)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+BASE="https://github.com/${REPO}/releases/latest/download"
+FALCON_DEB="${WORKDIR}/${FALCON_ASSET}"
+NESSUS_DEB="${WORKDIR}/${NESSUS_ASSET}"
+CHECKSUMS="${WORKDIR}/${CHECKSUMS_ASSET}"
+
+echo "[1/6] Downloading installers from GitHub Release assets..."
+download "${BASE}/${FALCON_ASSET}" "$FALCON_DEB"
+download "${BASE}/${NESSUS_ASSET}" "$NESSUS_DEB"
+
+# Optional checksum verification
+if download "${BASE}/${CHECKSUMS_ASSET}" "$CHECKSUMS"; then
+  if need_cmd sha256sum; then
+    echo "[2/6] Verifying SHA256 checksums..."
+    (cd "$WORKDIR" && sha256sum -c "$CHECKSUMS_ASSET") || die "Checksum verification failed."
+  else
+    echo "[2/6] checksums.txt present but sha256sum not available; skipping verification."
+  fi
+else
+  echo "[2/6] checksums.txt not found in release; skipping verification."
+fi
+echo
+
+# -----------------------------
+# Install / Configure CrowdStrike
+# -----------------------------
+echo "[3/6] CrowdStrike Falcon Sensor..."
+if is_installed falcon-sensor; then
+  echo "Falcon already installed; configuring CID + restarting service."
+else
+  echo "Installing Falcon package..."
+  dpkg -i "$FALCON_DEB" || true
+  if need_cmd apt-get; then apt-get -f install -y || true; fi
+fi
+
+FALCONCTL="/opt/CrowdStrike/falconctl"
+[[ -x "$FALCONCTL" ]] || die "falconctl not found at $FALCONCTL (install may have failed)."
+
+"$FALCONCTL" -s --cid="$CS_CID"
+start_service_if_present "falcon-sensor"
+
+if need_cmd systemctl; then
+  systemctl status falcon-sensor --no-pager || true
+fi
+echo
+
+# -----------------------------
+# Install / Link Nessus Agent
+# -----------------------------
+echo "[4/6] Tenable Nessus Agent..."
+if is_installed nessusagent; then
+  echo "Nessus Agent already installed; relinking + restarting service."
+else
+  echo "Installing Nessus Agent package..."
+  dpkg -i "$NESSUS_DEB" || true
+  if need_cmd apt-get; then apt-get -f install -y || true; fi
+fi
+
+NESSUSCLI="/opt/nessus_agent/sbin/nessuscli"
+[[ -x "$NESSUSCLI" ]] || die "nessuscli not found at $NESSUSCLI (install may have failed)."
+
+LINK_ARGS=(agent link --key="$NESSUS_KEY" --host="$NESSUS_HOST" --port="$NESSUS_PORT")
+if [[ -n "$NESSUS_GROUPS" ]]; then
+  LINK_ARGS+=(--groups="$NESSUS_GROUPS")
+fi
+
+"$NESSUSCLI" "${LINK_ARGS[@]}"
+
+# Service unit name differs by distro—try both
+start_service_if_present "nessusagent"
+start_service_if_present "nessus-agent"
+
+"$NESSUSCLI" agent status || true
+if need_cmd systemctl; then
+  systemctl status nessusagent --no-pager || systemctl status nessus-agent --no-pager || true
+fi
+echo
+
+# -----------------------------
+# Summary
+# -----------------------------
+echo "[5/6] Completed."
+echo "[6/6] Log saved to: $LOG_FILE"
+echo "Verification commands:"
+echo "  Falcon:  systemctl status falcon-sensor --no-pager"
+echo "  Nessus:  /opt/nessus_agent/sbin/nessuscli agent status"
