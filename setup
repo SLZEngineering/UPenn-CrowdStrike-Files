@@ -11,6 +11,7 @@
 set -euo pipefail
 
 SCRIPT_VERSION="1.0.0"
+SCRIPT_RAW_URL="https://raw.githubusercontent.com/SLZEngineering/UPenn-CrowdStrike-Files/refs/heads/main/setup"
 
 # -----------------------------
 # Post-Setup Agent Installer
@@ -32,27 +33,31 @@ NESSUS_PORT="${NESSUS_PORT:-8834}"
 NESSUS_GROUPS="${NESSUS_GROUPS:-}"
 
 usage() {
-  cat <<'EOF'
-Usage (non-interactive):
-  sudo bash post_setup_agents.sh \
-    --cid "<CROWDSTRIKE_CID>" \
-    --nessus-key "<NESSUS_LINK_KEY>" \
-    --nessus-host "<NESSUS_MANAGER_HOST>" \
-    [--nessus-port 8834] \
-    [--nessus-groups "Group1,Group2"] \
-    [--repo "OWNER/REPO"]
+  cat <<EOF
+Usage (Domotz terminal - one copy/paste):
+  curl -fsSL ${SCRIPT_RAW_URL} \\
+  | sudo bash -s -- --cid "<CROWDSTRIKE_CID>" --nessus-key "<NESSUS_LINK_KEY>" --nessus-host "<NESSUS_MANAGER_HOST>"
 
-Env var alternative:
-  export CS_CID="..."
-  export NESSUS_KEY="..."
-  export NESSUS_HOST="..."
-  sudo bash post_setup_agents.sh
+Direct (if you saved the file locally as "setup"):
+  sudo bash setup --cid "<CROWDSTRIKE_CID>" --nessus-key "<NESSUS_LINK_KEY>" --nessus-host "<NESSUS_MANAGER_HOST>"
+
+Options:
+  --cid           CrowdStrike CID
+  --nessus-key    Nessus linking key
+  --nessus-host   Nessus Manager hostname/IP
+  --nessus-port   Nessus Manager port (default: 8834)
+  --nessus-groups Optional groups "Group1,Group2"
+  --repo          GitHub OWNER/REPO (default: ${REPO})
 
 This script expects .deb installers as GitHub Release assets:
-  https://github.com/<OWNER>/<REPO>/releases/latest/download/falcon-sensor_amd64.deb
-  https://github.com/<OWNER>/<REPO>/releases/latest/download/NessusAgent_amd64.deb
-Optional:
-  checksums.txt in the same Release assets for sha256 verification.
+  https://github.com/<OWNER>/<REPO>/releases/latest/download/${FALCON_ASSET}
+  https://github.com/<OWNER>/<REPO>/releases/latest/download/${NESSUS_ASSET}
+
+Optional checksum verification asset:
+  https://github.com/<OWNER>/<REPO>/releases/latest/download/${CHECKSUMS_ASSET}
+
+Log file:
+  ${LOG_FILE}
 EOF
 }
 
@@ -137,9 +142,10 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=== Solutionz Domotz Post-Setup Agents ==="
 echo "Version: ${SCRIPT_VERSION}"
-echo "Repo: $REPO"
-echo "Time: $(date -Is)"
-echo "Log : $LOG_FILE"
+echo "Script : ${SCRIPT_RAW_URL}"
+echo "Repo   : $REPO"
+echo "Time   : $(date -Is)"
+echo "Log    : $LOG_FILE"
 echo
 
 # -----------------------------
@@ -240,3 +246,4 @@ echo "[6/6] Log saved to: $LOG_FILE"
 echo "Verification commands:"
 echo "  Falcon:  systemctl status falcon-sensor --no-pager"
 echo "  Nessus:  /opt/nessus_agent/sbin/nessuscli agent status"
+
